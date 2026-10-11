@@ -6,3 +6,5 @@ __pycache__/
 .vscode/
 .idea/
 *.md
+*_raw.html
+raw_index.html

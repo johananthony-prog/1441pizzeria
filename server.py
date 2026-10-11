@@ -1,633 +1,854 @@
 #!/usr/bin/env python3
 """
-DotPe 1441 Pizzeria - Offline Simulation Server & API Mock
+La Pino'z Pizza & uEngage - Offline Simulation Server & API Mock
 Reverse-Engineered Full-Stack Standalone Server
+Port: 8084 (configurable)
 """
 
 import http.server
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 import urllib.parse
 from http import HTTPStatus
-PORT = 8083
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CATALOG_PATH = os.path.join(BASE_DIR, "1441_pizzeria_thane_catalog.json")
-if not os.path.exists(CATALOG_PATH):
-    CATALOG_PATH = os.path.join(os.path.dirname(BASE_DIR), "1441_pizzeria_thane_catalog.json")
 
-# In-Memory State
+DEFAULT_PORT = 8084
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FEED_PATH = os.path.join(BASE_DIR, "lapinoz_feed_6634.json")
+if not os.path.exists(FEED_PATH):
+    FEED_PATH = os.path.join(BASE_DIR, "feed", "v2", "feed_6634.json")
+
+# Ensure MIME types are registered
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("font/woff", ".woff")
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/ttf", ".ttf")
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("application/json", ".json")
+
+# 1x1 Transparent PNG for Captcha simulation
+MOCK_CAPTCHA_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4"
+    b"\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+# In-Memory Session State
 SESSION_STATE = {
-    "cart": {},
+    "cart": {
+        "items": [],
+        "promoCode": None,
+        "promoDiscount": 0.0,
+        "walletApplied": 0.0,
+        "addressId": "addr_101",
+        "orderType": "1",  # 1: Delivery, 2: Pickup
+    },
     "orders": {},
     "users": {
         "9876543210": {
-            "userId": "usr_1441_99",
+            "contactId": "100982",
+            "contactMappingId": "cm_887123",
             "name": "Guest Customer",
-            "phone": "9876543210",
+            "mobile": "9876543210",
+            "token": "mock_jwt_token_lapinoz_thane_9912",
             "addresses": [
                 {
+                    "id": "addr_101",
                     "addressId": "addr_101",
-                    "address1": "Flat 402, Sunshine Heights",
-                    "address2": "Ghodbunder Road",
+                    "name": "Home",
+                    "addressLine1": "Flat 402, Sunshine Heights",
+                    "addressLine2": "Pokhran Road No. 1",
+                    "locality": "Vartak Nagar",
                     "city": "Thane",
-                    "pincode": "400607",
-                    "tag": "Home",
-                    "latitude": 19.2183,
-                    "longitude": 72.9781
+                    "pincode": "400606",
+                    "latitude": "19.212791",
+                    "longitude": "72.959877",
+                    "addressType": "Home",
+                    "isDefault": 1,
                 }
-            ]
+            ],
+            "wallet": {
+                "balance": 150.0,
+                "points": 150,
+                "pts_unit": "LP Coins",
+            },
         }
-    }
+    },
 }
 
-def load_catalog_data():
-    """Transforms scraped 1441 Pizzeria catalog into DotPe storeMenu schema."""
-    if not os.path.exists(CATALOG_PATH):
-        print(f"Warning: Catalog file not found at {CATALOG_PATH}")
-        return [], {}
 
-    with open(CATALOG_PATH, "r", encoding="utf-8") as f:
-        catalog_raw = json.load(f)
+def load_catalog_feed():
+    """Loads and indexes the raw feed_6634.json menu data."""
+    if not os.path.exists(FEED_PATH):
+        print(f"[Warning] Menu feed not found at {FEED_PATH}")
+        return {}, {}
 
-    categories_list = []
-    menu_items_dict = {}
-    item_id_counter = 1000
+    try:
+        with open(FEED_PATH, "r", encoding="utf-8") as f:
+            feed_raw = json.load(f)
+    except Exception as e:
+        print(f"[Error] Failed to read feed file: {e}")
+        return {}, {}
 
-    for cat_idx, cat_obj in enumerate(catalog_raw.get("categories", []), 1):
-        c_name = cat_obj.get("category", f"Category {cat_idx}")
-        c_item_ids = []
+    item_lookup = {}
+    templates_lookup = {}
 
-        for it in cat_obj.get("items", []):
-            item_id_counter += 1
-            i_id = item_id_counter
-            c_item_ids.append(i_id)
+    # 1. Customization templates
+    templates = feed_raw.get("rows", {}).get("templates", []) or []
+    for t in templates:
+        t_id = str(t.get("templateId", ""))
+        item_lookup[t_id] = t
+        for sub_item in t.get("items", []):
+            s_id = str(sub_item.get("itemId", ""))
+            item_lookup[s_id] = sub_item
+            templates_lookup[s_id] = sub_item
 
-            name = it.get("name", "")
-            price = float(it.get("price", 0))
-            is_customizable = "Y" if it.get("customizable") else "N"
-            desc = it.get("description", "")
-            is_veg = not any(w in name.lower() or w in desc.lower() for w in [
-                "chicken", "meat", "pork", "pepperoni", "salami", "sausage", "seafood", "fish", "tuna"
-            ])
+    # 2. Menu Sections, Items, and Variants
+    menu = feed_raw.get("rows", {}).get("menu", []) or []
+    for sec in menu:
+        for it in sec.get("items", []):
+            i_id = str(it.get("id", ""))
+            item_lookup[i_id] = it
+            for v in it.get("variants", []):
+                v_id = str(v.get("id", ""))
+                item_lookup[v_id] = v
+                for sv in v.get("variants", []):
+                    sv_id = str(sv.get("id", ""))
+                    item_lookup[sv_id] = sv
 
-            options = []
-            if is_customizable == "Y":
-                options.append({
-                    "title": "Select Crust",
-                    "mandatory": True,
-                    "min": 1,
-                    "max": 1,
-                    "options": [
-                        {"id": f"crust_thin_{i_id}", "name": "Traditional Thin Crust", "price": 0},
-                        {"id": f"crust_cheese_{i_id}", "name": "Cheese Burst Crust", "price": 120}
-                    ]
-                })
-                options.append({
-                    "title": "Select Sauce",
-                    "mandatory": True,
-                    "min": 1,
-                    "max": 1,
-                    "options": [
-                        {"id": f"sauce_italian_{i_id}", "name": "Classic Italian Tomato Sauce", "price": 0},
-                        {"id": f"sauce_periperi_{i_id}", "name": "Spicy Peri Peri Sauce", "price": 30}
-                    ]
-                })
-                options.append({
-                    "title": "Extra Toppings",
-                    "mandatory": False,
-                    "min": 0,
-                    "max": 5,
-                    "options": [
-                        {"id": f"top_cheese_{i_id}", "name": "Extra Mozzarella Cheese", "price": 75},
-                        {"id": f"top_olives_{i_id}", "name": "Black Olives", "price": 45},
-                        {"id": f"top_jalapeno_{i_id}", "name": "Jalapenos", "price": 45},
-                        {"id": f"top_mushroom_{i_id}", "name": "Grilled Mushrooms", "price": 60}
-                    ]
-                })
-
-            menu_items_dict[str(i_id)] = {
-                "itemID": i_id,
-                "categoryID": cat_idx,
-                "itemName": name,
-                "price": price,
-                "basePrice": price,
-                "description": desc,
-                "image": it.get("image", ""),
-                "isVegetarian": is_veg,
-                "isCustomizable": is_customizable,
-                "itemSaleType": "delivery",
-                "itemType": "standard",
-                "options": options
-            }
-
-        categories_list.append({
-            "categoryId": cat_idx,
-            "categoryName": c_name,
-            "itemIDs": c_item_ids
-        })
-
-    return categories_list, menu_items_dict
-
-CATEGORIES_DATA, MENU_ITEMS_DATA = load_catalog_data()
+    print(f"[Init] Loaded feed from {FEED_PATH} ({len(menu)} sections, {len(item_lookup)} indexed entities)")
+    return feed_raw, item_lookup
 
 
-class DotPeHandler(http.server.SimpleHTTPRequestHandler):
-    """Custom HTTP handler that serves DotPe SPA assets and mocks backend REST endpoints."""
+FEED_DATA, ITEM_LOOKUP = load_catalog_feed()
+
+
+class LaPinozHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP Request Handler serving La Pino'z localized assets and mocking uEngage APIs."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=BASE_DIR, **kwargs)
 
     def _send_json(self, data, status_code=200):
-        response_bytes = json.dumps(data).encode("utf-8")
+        """Sends a JSON response with permissive CORS headers."""
+        response_bytes = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(response_bytes)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, session_id, app_version")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Token, token, Accept, X-Requested-With")
         self.end_headers()
         self.wfile.write(response_bytes)
 
+    def _send_bytes(self, content_bytes, content_type="application/octet-stream", status_code=200):
+        """Sends raw bytes (images, stylesheets, scripts)."""
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content_bytes)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(content_bytes)
+
+    def _serve_file(self, filename):
+        """Serves an HTML file from BASE_DIR."""
+        target_path = os.path.join(BASE_DIR, filename)
+        if not os.path.exists(target_path):
+            self.send_error(404, f"File {filename} not found")
+            return
+        with open(target_path, "rb") as f:
+            content = f.read()
+        self._send_bytes(content, "text/html; charset=utf-8")
+
     def do_OPTIONS(self):
-        """Handle CORS pre-flight requests."""
+        """Handles CORS preflight checks."""
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, session_id, app_version")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Token, token, Accept, X-Requested-With")
         self.end_headers()
 
+    def do_HEAD(self):
+        """Handle HEAD requests mirroring GET logic."""
+        self.do_GET()
+
+    def _parse_body(self):
+        """Parses POST request body handling JSON, Form Data, and Multipart Form Data."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0:
+            return {}
+
+        raw_bytes = self.rfile.read(content_length)
+        content_type = self.headers.get("Content-Type", "")
+
+        # 1. JSON
+        if "application/json" in content_type:
+            try:
+                return json.loads(raw_bytes.decode("utf-8"))
+            except Exception:
+                return {}
+
+        # 2. Multipart form data
+        if "multipart/form-data" in content_type:
+            boundary = None
+            for part in content_type.split(";"):
+                if "boundary=" in part:
+                    boundary = part.split("boundary=")[1].strip().strip('"').strip("'")
+                    break
+            if boundary:
+                result = {}
+                delimiter = ("--" + boundary).encode("latin-1")
+                chunks = raw_bytes.split(delimiter)
+                for chunk in chunks:
+                    if not chunk or chunk.startswith(b"--") or chunk == b"\r\n":
+                        continue
+                    parts = chunk.split(b"\r\n\r\n", 1)
+                    if len(parts) < 2:
+                        continue
+                    header_part, body_part = parts
+                    header_str = header_part.decode("latin-1", errors="ignore")
+                    m = re.search(r'name="([^"]+)"', header_str)
+                    if m:
+                        name = m.group(1)
+                        if body_part.endswith(b"\r\n"):
+                            body_part = body_part[:-2]
+                        result[name] = body_part.decode("utf-8", errors="ignore")
+                return result
+
+        # 3. URL-encoded
+        try:
+            parsed = urllib.parse.parse_qs(raw_bytes.decode("utf-8"))
+            return {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+        except Exception:
+            return {}
+
+    # ─────────────────────────────────────────────────────────────
+    # GET Request Dispatcher
+    # ─────────────────────────────────────────────────────────────
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         path = url.path
         query = urllib.parse.parse_qs(url.query)
 
-        # 1. API: Store Metadata
-        if path.startswith("/api/merchant/external/cstore/") or path.startswith("/api/merchant/external/store/"):
-            if "/menu" in path:
-                return self._handle_get_menu(query)
-            return self._handle_get_cstore(path, query)
+        # 1. Menu Feed JSON
+        if path.startswith("/feed/v2/feed_"):
+            return self._send_json(FEED_DATA)
 
-        # 2. API: Merchant Info
-        if path == "/api/merchant/external/merchant/info":
+        # 2. Dietary & Tag Filter Definitions
+        if path == "/client/getFilterList":
+            return self._handle_get_filter_list()
+
+        # 3. Time Slots
+        if path.startswith("/client/getSlotsList"):
+            return self._handle_get_slots()
+
+        # 4. User LP Coins / Wallet Details
+        if path == "/client/getWalletDetails":
+            return self._handle_get_wallet_details(query)
+
+        # 5. Saved User Addresses
+        if path == "/client/getUserAddresses":
+            return self._handle_get_user_addresses(query)
+
+        # 6. Delivery Availability & Geocoding
+        if path == "/client/checkDelivery":
+            return self._send_json({"status": 1, "deliverable": 1, "msg": "Delivery available in Thane"})
+
+        if path == "/maps/getGeocodeAddress":
             return self._send_json({
-                "status": True,
-                "data": {
-                    "merchant": {
-                        "merchantId": 1001,
-                        "merchantName": "1441 Pizzeria",
-                        "logo": "https://cdn.dotpe.in/merchants/1441/logo.png"
-                    }
+                "status": 1,
+                "result": {
+                    "formatted_address": "Vartak Nagar, Thane, Maharashtra 400606",
+                    "locality": "Vartak Nagar",
+                    "city": "Thane",
+                    "pincode": "400606",
+                    "lat": "19.212791",
+                    "lng": "72.959877"
                 }
             })
 
-        # 3. API: Promotional Banners
-        if "/banners" in path:
+        # 7. Set Delivery Address
+        if path == "/client/setDeliveryAddress":
+            addr_id = query.get("addressId", ["addr_101"])[0]
+            SESSION_STATE["cart"]["addressId"] = addr_id
+            return self._send_json({"status": 1, "msg": "Delivery address set successfully"})
+
+        # 8. Promo Code Application & Removal
+        if path == "/client/applyPromo":
+            return self._handle_apply_promo(query)
+
+        if path == "/client/removePromo":
+            SESSION_STATE["cart"]["promoCode"] = None
+            SESSION_STATE["cart"]["promoDiscount"] = 0.0
+            return self._recalculate_cart_response()
+
+        # 9. Wallet (LP Coins) Application & Removal
+        if path == "/client/applyWallet":
+            pts = float(query.get("points", [50])[0])
+            SESSION_STATE["cart"]["walletApplied"] = min(pts, 150.0)
+            return self._recalculate_cart_response()
+
+        if path == "/client/removeWallet":
+            SESSION_STATE["cart"]["walletApplied"] = 0.0
+            return self._recalculate_cart_response()
+
+        # 10. Payment Initiation & Order Checkout
+        if path in ("/pay/initiate/2.0/json", "/pay/initiate/json"):
+            return self._handle_pay_initiate(query)
+
+        # 11. Order Status Polling
+        if path == "/client/getOrderStatus":
+            return self._handle_get_order_status(query)
+
+        # 12. uMoney / Wallet Payment Status
+        if path == "/umoney/checkOrderPaymentStatus":
+            return self._send_json({"status": 1, "paymentStatus": "success", "current_status": "1"})
+
+        # 13. Active Orders
+        if path == "/client/getActiveOrders":
+            return self._handle_get_active_orders()
+
+        # 14. Loyalty CRM Catalogs
+        if path == "/crm_api/loyalty/item_wise/earn_burn_catalog":
             return self._send_json({
-                "status": True,
-                "data": {
-                    "promoBanners": [
-                        {
-                            "id": 1,
-                            "imageUrl": "https://cdn.dotpe.in/merchants/1441/banners/banner1.jpg",
-                            "title": "Authentic Wood-fired Pizzas",
-                            "subTitle": "Crafted with Italian San Marzano Tomatoes"
-                        }
-                    ]
-                }
+                "status": 1,
+                "catalog": [
+                    {"itemId": "1768168", "earn_points": 10, "burn_points": 50},
+                    {"itemId": "46944453", "earn_points": 25, "burn_points": 100}
+                ]
             })
 
-        # 4. API: Catalog Menu
-        if path.startswith("/api/catalog/store/") and path.endswith("/menu"):
-            return self._handle_get_menu(query)
+        if path == "/crm_api/get/loyalty/rules/details":
+            return self._send_json({"status": 1, "rules": {"cashback_percentage": 5, "min_order_value": 200}})
 
-        # 5. API: Promo Details
-        if path == "/api/promo/details" or path == "/api/promo/auto":
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "coupons": [
-                        {
-                            "code": "PIZZA1441",
-                            "discount": 50.0,
-                            "minOrder": 299.0,
-                            "description": "Flat ₹50 OFF on Woodfired Pizzas"
-                        }
-                    ]
-                }
-            })
+        # 15. Menu Global Search
+        if path == "/search":
+            return self._handle_search(query)
 
-        # 6. API: Payment Modes
-        if path == "/api/payment/v2/modes":
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "modes": [
-                        {"id": "razorpay", "name": "Cards / UPI / NetBanking", "type": "gateway", "enabled": True},
-                        {"id": "simpl", "name": "Simpl 1-Tap Pay Later", "type": "paylater", "enabled": True},
-                        {"id": "cod", "name": "Cash on Delivery", "type": "offline", "enabled": True}
-                    ]
-                }
-            })
+        # 16. Captcha Image
+        if path == "/auth/captcha":
+            return self._send_bytes(MOCK_CAPTCHA_PNG, "image/png")
 
-        # 7. API: Serviceability Check
-        if path == "/api/location/serviceability/get":
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "isServiceable": True,
-                    "deliveryFee": 40.0,
-                    "estimatedDeliveryTimeMinutes": 35
-                }
-            })
+        # 17. Page Routing
+        if path.startswith("/order-polling"):
+            return self._serve_file("order_polling.html")
 
-        # 8. API: User Login / OTP Trigger
-        if path.startswith("/api/userservice/user/login/"):
-            phone = path.split("/")[-1]
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "otpSent": True,
-                    "phone": phone,
-                    "message": "OTP 1234 sent successfully"
-                }
-            })
+        if path.startswith("/checkout"):
+            return self._serve_file("checkout.html")
 
-        # 9. API: User Profile by Phone
-        if path.startswith("/api/userservice/user/v2/getByPhone/"):
-            phone = path.split("/")[-1]
-            user = SESSION_STATE["users"].get(phone, {
-                "userId": f"usr_{phone[-4:]}",
-                "name": "Guest Customer",
-                "phone": phone
-            })
-            return self._send_json({"status": True, "data": {"user": user}})
+        if path == "/" or path.startswith("/order"):
+            return self._serve_file("index.html")
 
-        # 10. API: Address List
-        if path.startswith("/api/userservice/address/v2/getByPhone/"):
-            phone = path.split("/")[-1]
-            user = SESSION_STATE["users"].get(phone, {})
-            addresses = user.get("addresses", [])
-            return self._send_json({"status": True, "data": {"addresses": addresses}})
-
-        # 11. API: Payment Transaction Status Polling
-        if path.startswith("/api/payment/v2/transaction/status/"):
-            txn_id = path.split("/")[-1]
-            return self._send_json({
-                "status": 200,
-                "data": {
-                    "status": "SUCCESS",
-                    "transactionId": txn_id,
-                    "paymentStatus": 3,
-                    "message": "Payment verified successfully"
-                }
-            })
-
-        # 12. API: Order Details & Live Tracking
-        if path.startswith("/api/morder/order/hash/detail/"):
-            o_hash = path.split("/")[-1]
-            order = SESSION_STATE["orders"].get(o_hash, {
-                "orderID": f"DP1441_{o_hash[:6].upper()}",
-                "oHash": o_hash,
-                "orderStatus": "PREPARING",
-                "paymentStatus": 3,
-                "paymentMethod": "Razorpay UPI",
-                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "deliveryTimeMinutes": 30,
-                "items": [
-                    {"name": "Krish's Pizza (Thin Crust)", "quantity": 1, "price": 499.0},
-                    {"name": "Choco Lava Cake", "quantity": 1, "price": 99.0}
-                ],
-                "billingDetails": {
-                    "itemTotal": 598.0,
-                    "taxes": 29.9,
-                    "packaging": 25.0,
-                    "delivery": 40.0,
-                    "total": 692.9
-                },
-                "deliveryDetails": {
-                    "address": "Flat 402, Sunshine Heights, Ghodbunder Road, Thane",
-                    "customerPhone": "9876543210"
-                }
-            })
-            return self._send_json({"status": True, "orderDetails": order})
-
-        # 13. API: Tax Invoice Fetch
-        if path == "/api/invoice/fetch":
-            o_hash = query.get("hash", ["default_hash"])[0]
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "invoiceNumber": f"INV-1441-{int(time.time())}",
-                    "gstin": "27AABCU9603R1ZM",
-                    "orderHash": o_hash,
-                    "date": time.strftime("%d-%m-%Y"),
-                    "breakup": {
-                        "cgst": 14.95,
-                        "sgst": 14.95,
-                        "totalTax": 29.90
-                    }
-                }
-            })
-
-        # 14. Static Files & SPA Routing Fallback
-        file_path = os.path.join(BASE_DIR, path.lstrip("/"))
-        if os.path.exists(file_path) and not os.path.isdir(file_path):
+        # 18. Local Static Files Fallback
+        clean_path = path.lstrip("/")
+        local_file = os.path.join(BASE_DIR, clean_path)
+        if os.path.exists(local_file) and not os.path.isdir(local_file):
             return super().do_GET()
 
-        # SPA Fallback: Any other path serves index.html
-        return self._serve_index_html()
+        # SPA Fallback to index.html
+        return self._serve_file("index.html")
 
+    # ─────────────────────────────────────────────────────────────
+    # POST Request Dispatcher
+    # ─────────────────────────────────────────────────────────────
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
         path = url.path
-        body = self._parse_json_body()
+        body = self._parse_body()
 
-        # 1. API: Platform Analytics / Scan
-        if path == "/api/perz/platform/scan":
-            return self._send_json({"status": True, "message": "Scan recorded"})
-
-        # 2. API: Cart Sync & Pricing Breakdown
-        if path == "/api/cart":
+        # 1. Cart Synchronization Engine
+        if path == "/client/cart":
             return self._handle_cart_sync(body)
 
-        # 3. API: Cart Validation
-        if path == "/api/cart/validate":
-            return self._send_json({
-                "status": 200,
-                "data": {
-                    "status": True,
-                    "isCartValid": True,
-                    "modifiedItems": {},
-                    "removedItems": {}
-                }
-            })
+        # 2. Authentication: Send OTP
+        if path == "/auth/send-otp":
+            phone = body.get("mobile", "9876543210")
+            print(f"[Auth] Sent Mock OTP for {phone}: 1234")
+            return self._send_json({"status": 1, "msg": "OTP sent successfully. Enter 1234 to log in."})
 
-        # 4. API: Delivery Check
-        if path == "/api/cart/check/delivery":
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "isServiceable": True,
-                    "deliveryFee": 40.0,
-                    "estimatedDeliveryTimeMinutes": 35,
-                    "minOrderAmount": 200.0
-                }
-            })
-
-        # 5. API: Verify OTP
-        if path == "/api/userservice/user/verifyOtp":
-            phone = body.get("phone", "9876543210")
-            name = body.get("name", "Guest Customer")
-            user_id = f"usr_{phone[-4:]}"
+        # 3. Authentication: Verify OTP
+        if path == "/auth/verify-otp":
+            phone = body.get("mobile", "9876543210")
+            otp = body.get("otp", "1234")
+            user_data = {
+                "token": f"mock_jwt_{phone}_{int(time.time())}",
+                "contactId": "100982",
+                "contactMappingId": "cm_887123",
+                "mobile": phone,
+                "name": "Guest Customer"
+            }
             SESSION_STATE["users"][phone] = {
-                "userId": user_id,
-                "name": name,
-                "phone": phone,
-                "addresses": SESSION_STATE["users"].get(phone, {}).get("addresses", [])
+                **user_data,
+                "addresses": SESSION_STATE["users"].get("9876543210", {}).get("addresses", []),
+                "wallet": {"balance": 150.0, "points": 150, "pts_unit": "LP Coins"}
             }
             return self._send_json({
-                "status": True,
-                "data": {
-                    "auth_token": f"mock_jwt_token_{int(time.time())}",
-                    "user_id": user_id,
-                    "user": {
-                        "phone": phone,
-                        "userName": name
-                    }
-                }
+                "status": 1,
+                "msg": "Login Successful",
+                "rows": user_data,
+                "result": user_data
             })
 
-        # 6. API: Address Create
-        if path == "/api/userservice/address/create":
-            phone = body.get("phone", "9876543210")
-            addr_id = f"addr_{int(time.time() % 1000)}"
+        # 4. Save User Address
+        if path == "/client/saveUserAddress":
+            new_id = f"addr_{int(time.time() % 1000)}"
             new_addr = {
-                "addressId": addr_id,
-                "address1": body.get("address1", "Street 1"),
-                "address2": body.get("address2", "Area"),
+                "id": new_id,
+                "addressId": new_id,
+                "name": body.get("name", "Home"),
+                "addressLine1": body.get("addressLine1", "Flat 402, Sunshine Heights"),
+                "addressLine2": body.get("addressLine2", "Pokhran Road No. 1"),
+                "locality": body.get("locality", "Vartak Nagar"),
                 "city": body.get("city", "Thane"),
-                "pincode": body.get("pincode", "400607"),
-                "tag": body.get("tag", "Home"),
-                "latitude": body.get("latitude", 19.2183),
-                "longitude": body.get("longitude", 72.9781)
+                "pincode": body.get("pincode", "400606"),
+                "latitude": body.get("latitude", "19.212791"),
+                "longitude": body.get("longitude", "72.959877"),
+                "addressType": body.get("addressType", "Home"),
+                "isDefault": 1
             }
-            if phone in SESSION_STATE["users"]:
-                SESSION_STATE["users"][phone].setdefault("addresses", []).append(new_addr)
-            return self._send_json({"status": True, "data": {"addressId": addr_id}})
+            SESSION_STATE["users"]["9876543210"]["addresses"].append(new_addr)
+            SESSION_STATE["cart"]["addressId"] = new_id
+            return self._send_json({"status": 1, "msg": "Address saved successfully", "result": {"addressId": new_id}})
 
-        # 7. API: Order Checkout
-        if path == "/api/cart/checkout" or path == "/api/cart/super/checkout":
-            return self._handle_checkout(body)
+        # 5. Pack Payment Status
+        if path == "/PackageConfiguration/checkOrderPaymentStatus":
+            return self._send_json({"status": 1, "current_status": "1"})
 
-        # 8. API: Initiate Payment
-        if path == "/api/payment/v2/transaction/initiate":
-            order_id = body.get("orderID", "DP1441_SAMPLE")
-            pay_amount = body.get("payAmount", 500.0)
-            txn_id = f"txn_{int(time.time())}"
-            return self._send_json({
-                "status": True,
-                "data": {
-                    "transactionId": txn_id,
-                    "orderID": order_id,
-                    "status": "INITIATED",
-                    "amount": int(pay_amount * 100),
-                    "key": "rzp_test_mock_1441",
-                    "paymentUrl": f"/payment/processing/{txn_id}"
-                }
-            })
+        # Fallback 404
+        return self._send_json({"status": 0, "msg": f"Endpoint {path} not implemented"}, status_code=404)
 
-        # Default fallback
-        return self._send_json({"status": True, "message": "OK"})
+    # ─────────────────────────────────────────────────────────────
+    # API Implementation Handlers
+    # ─────────────────────────────────────────────────────────────
 
-    def do_PUT(self):
-        body = self._parse_json_body()
-        return self._send_json({"status": True, "data": body})
-
-    def _parse_json_body(self):
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length > 0:
-                raw_data = self.rfile.read(content_length).decode("utf-8")
-                return json.loads(raw_data)
-        except Exception:
-            pass
-        return {}
-
-    def _handle_get_cstore(self, path, query):
-        """Returns Store 6 (1441 Pizzeria - Thane) configuration."""
-        data = {
-            "status": True,
-            "data": {
-                "store": {
-                    "storeId": 6,
-                    "storeName": "1441 Pizzeria - Thane",
-                    "merchantId": 1001,
-                    "address": "Ground Floor, Viviana Mall, Eastern Express Hwy, Thane West",
-                    "phone": "+919876543210",
-                    "city": "Thane",
-                    "lat": 19.2085,
-                    "lng": 72.9715,
-                    "isCorporate": False,
-                    "storeServices": {
-                        "delivery": True,
-                        "pickup": True,
-                        "instore": ["takeaway"]
-                    },
-                    "configs": {
-                        "UITemplateData": {
-                            "primaryColorCode": "#D32F2F",
-                            "secondaryColorCode": "#212121",
-                            "fontFamily": "Encode Sans"
-                        },
-                        "taxConfig": {
-                            "gstPercentage": 5.0
-                        },
-                        "packagingCharges": 25.0
-                    }
-                },
-                "merchant": {
-                    "merchantId": 1001,
-                    "merchantName": "1441 Pizzeria",
-                    "logo": "https://cdn.dotpe.in/merchants/1441/logo.png"
-                }
-            }
-        }
-        return self._send_json(data)
-
-    def _handle_get_menu(self, query):
-        """Returns 1441 Pizzeria menu hierarchy."""
-        data = {
-            "status": True,
-            "data": {
-                "categories": CATEGORIES_DATA,
-                "menuItems": MENU_ITEMS_DATA,
-                "preorderFlags": {
-                    "isPreorderEnabled": False
-                }
-            }
-        }
-        return self._send_json(data)
-
-    def _handle_cart_sync(self, body):
-        """Computes subtotal, GST (5%), packaging (₹25), delivery (₹40)."""
-        items = body.get("items", [])
-        item_total = 0.0
-        total_qty = 0
-
-        for it in items:
-            qty = it.get("itemQty", 1)
-            price = float(it.get("price", 0))
-            item_total += price * qty
-            total_qty += qty
-
-        taxes = round(item_total * 0.05, 2)
-        packaging = 25.0 if item_total > 0 else 0.0
-        delivery = 40.0 if item_total > 0 else 0.0
-        total_payable = round(item_total + taxes + packaging + delivery, 2)
-
-        cart_id = body.get("cartID") or f"cart_1441_{int(time.time())}"
-        cart_data = {
-            "cartID": cart_id,
-            "storeID": 6,
-            "merchantID": 1001,
-            "itemTotal": item_total,
-            "taxes": taxes,
-            "packagingCharges": packaging,
-            "deliveryCharge": delivery,
-            "discount": 0.0,
-            "totalPayable": total_payable,
-            "payAmount": total_payable,
-            "remainingAmount": total_payable,
-            "cartQuantity": total_qty,
-            "items": items
-        }
-        SESSION_STATE["cart"][cart_id] = cart_data
-        return self._send_json({"status": 200, "data": {"cart": cart_data, "status": True}})
-
-    def _handle_checkout(self, body):
-        """Creates order record and generates orderID and oHash."""
-        order_num = int(time.time() % 100000)
-        order_id = f"DP1441-{order_num}"
-        o_hash = f"hash1441{order_num}xyz"
-
-        items = body.get("items", [])
-        item_total = sum(float(it.get("price", 0)) * it.get("itemQty", 1) for it in items)
-        taxes = round(item_total * 0.05, 2)
-        total_payable = round(item_total + taxes + 25.0 + 40.0, 2) if item_total > 0 else 0.0
-
-        order_record = {
-            "orderID": order_id,
-            "oHash": o_hash,
-            "orderStatus": "PREPARING",
-            "paymentStatus": 3,
-            "paymentMethod": "Razorpay UPI",
-            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "deliveryTimeMinutes": 35,
-            "items": items,
-            "billingDetails": {
-                "itemTotal": item_total,
-                "taxes": taxes,
-                "packaging": 25.0,
-                "delivery": 40.0,
-                "total": total_payable
-            },
-            "deliveryDetails": {
-                "address": body.get("userInfo", {}).get("address", {}).get("address1", "Thane"),
-                "customerPhone": body.get("phone", "9876543210")
-            }
-        }
-        SESSION_STATE["orders"][o_hash] = order_record
-
+    def _handle_get_filter_list(self):
+        """Returns filter tags (dietary & popular badges)."""
         return self._send_json({
-            "status": 200,
-            "data": {
-                "status": True,
-                "orderID": order_id,
-                "oHash": o_hash,
-                "payAmount": total_payable,
-                "remainingAmount": total_payable,
-                "paymentMethods": ["razorpay", "simpl", "cod"]
+            "status": 1,
+            "list": [
+                {
+                    "title": "Dietary",
+                    "list": [
+                        {"tagKey": "veg", "title": "Veg", "icon": "", "color": "#008000", "displayMode": "name", "is_usp": 0},
+                        {"tagKey": "non-veg", "title": "Non-Veg", "icon": "", "color": "#b22222", "displayMode": "name", "is_usp": 0}
+                    ]
+                },
+                {
+                    "title": "Highlights",
+                    "list": [
+                        {"tagKey": "bestseller", "title": "Bestseller", "icon": "", "color": "#ff9900", "displayMode": "name", "is_usp": 0},
+                        {"tagKey": "new", "title": "New", "icon": "", "color": "#0099ff", "displayMode": "name", "is_usp": 0}
+                    ]
+                }
+            ]
+        })
+
+    def _handle_get_slots(self):
+        """Returns delivery & pickup time slots."""
+        today_str = time.strftime("%Y-%m-%d")
+        return self._send_json({
+            "status": 1,
+            "result": [
+                {
+                    "date": today_str,
+                    "label": "Today",
+                    "slots": [
+                        {"id": "1", "label": "Deliver Now (30 Mins)", "start_time": "10:00", "end_time": "23:00", "is_available": 1},
+                        {"id": "2", "label": "08:00 PM - 09:00 PM", "start_time": "20:00", "end_time": "21:00", "is_available": 1},
+                        {"id": "3", "label": "09:00 PM - 10:00 PM", "start_time": "21:00", "end_time": "22:00", "is_available": 1}
+                    ]
+                }
+            ]
+        })
+
+    def _handle_get_wallet_details(self, query):
+        """Returns user's LP Coins wallet balance."""
+        user = SESSION_STATE["users"].get("9876543210", {})
+        wallet = user.get("wallet", {"balance": 150.0, "points": 150, "pts_unit": "LP Coins"})
+        return self._send_json({
+            "status": 1,
+            "result": {
+                "balance": wallet["balance"],
+                "points": wallet["points"],
+                "currency": "₹",
+                "pts_unit": wallet["pts_unit"],
+                "title": "LP Coins Balance",
+                "description": "Redeem up to 150 LP Coins on this order"
             }
         })
 
-    def _serve_index_html(self):
-        """Serve index.html for SPA client-side routing."""
-        index_file = os.path.join(BASE_DIR, "index.html")
-        if not os.path.exists(index_file):
-            self.send_error(404, "index.html not found")
-            return
+    def _handle_get_user_addresses(self, query):
+        """Returns saved delivery addresses."""
+        user = SESSION_STATE["users"].get("9876543210", {})
+        addrs = user.get("addresses", [])
+        return self._send_json({"status": 1, "result": addrs})
 
-        with open(index_file, "rb") as f:
-            content = f.read()
+    def _handle_apply_promo(self, query):
+        """Applies promo code to cart calculation."""
+        code = query.get("promoCode", [""])[0].upper()
+        if code in ("LAPINOZ50", "DISCOUNT50"):
+            SESSION_STATE["cart"]["promoCode"] = code
+            SESSION_STATE["cart"]["promoDiscount"] = 50.0
+            return self._recalculate_cart_response(promo_msg="Coupon LAPINOZ50 applied! Flat ₹50 OFF.")
+        elif code in ("WELCOME", "FIRST10"):
+            SESSION_STATE["cart"]["promoCode"] = code
+            SESSION_STATE["cart"]["promoDiscount"] = 35.0
+            return self._recalculate_cart_response(promo_msg="Welcome Coupon applied! ₹35 OFF.")
+        else:
+            return self._send_json({"status": 0, "msg": f"Invalid or expired promo code '{code}'"})
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
+    def _handle_search(self, query):
+        """Searches indexed items in the catalog."""
+        q = query.get("q", [""])[0].lower().strip()
+        matched_items = []
+        if q:
+            for it_id, it in ITEM_LOOKUP.items():
+                name = it.get("itemName", "")
+                desc = it.get("description", "")
+                if q in name.lower() or q in desc.lower():
+                    matched_items.append({
+                        "id": it_id,
+                        "itemId": it_id,
+                        "itemName": name,
+                        "sectionName": "Sides" if "sides" in it.get("sectionName", "").lower() else "Menu",
+                        "businessName": "La Pino'z Pizza",
+                        "sp": it.get("sp", 0),
+                        "mrp": it.get("mrp", 0),
+                        "image": it.get("image", "")
+                    })
+                    if len(matched_items) >= 15:
+                        break
+        return self._send_json({
+            "status": 1,
+            "result": {
+                "items": matched_items,
+                "merchants": [{"id": 6634, "parentId": 5, "name": "La Pino'z Pizza"}]
+            }
+        })
+
+    def _handle_cart_sync(self, body):
+        """Processes cart modifications (add, delete, sync) and computes order breakdown."""
+        action = body.get("action", "add")
+        order_type = str(body.get("orderType", "1"))
+        SESSION_STATE["cart"]["orderType"] = order_type
+
+        # Handle 'delete' action
+        if action == "delete":
+            item_id_to_del = str(body.get("itemId", ""))
+            current_items = SESSION_STATE["cart"]["items"]
+            # Remove line matching orderItemId or itemId
+            SESSION_STATE["cart"]["items"] = [
+                it for it in current_items
+                if str(it.get("orderItemId", "")) != item_id_to_del and str(it.get("itemId", "")) != item_id_to_del
+            ]
+            return self._recalculate_cart_response()
+
+        # Handle 'add' action
+        cart_raw = body.get("cart")
+        if cart_raw:
+            try:
+                cart_obj = json.loads(cart_raw) if isinstance(cart_raw, str) else cart_raw
+                new_items = cart_obj.get("items", [])
+                if new_items:
+                    # Append or replace lines in server state
+                    for n_it in new_items:
+                        i_id = str(n_it.get("itemId", ""))
+                        qty = int(n_it.get("qty", 1))
+                        subs = n_it.get("subItems", [])
+
+                        # Find matching entry or add new
+                        found = False
+                        for existing in SESSION_STATE["cart"]["items"]:
+                            if str(existing.get("itemId")) == i_id:
+                                existing["qty"] = qty
+                                existing["subItems"] = subs
+                                found = True
+                                break
+                        if not found:
+                            SESSION_STATE["cart"]["items"].append({
+                                "orderItemId": f"oi_{int(time.time() * 1000) % 100000}_{len(SESSION_STATE['cart']['items']) + 1}",
+                                "itemId": i_id,
+                                "qty": qty,
+                                "subItems": subs
+                            })
+            except Exception as e:
+                print(f"[Cart] Error parsing incoming cart payload: {e}")
+
+        return self._recalculate_cart_response()
+
+    def _recalculate_cart_response(self, promo_msg=None):
+        """Calculates item totals, taxes, packaging, delivery fee, and returns standard uEngage payload."""
+        cart_state = SESSION_STATE["cart"]
+        lines = []
+        subtotal = 0.0
+
+        for idx, entry in enumerate(cart_state["items"]):
+            i_id = str(entry.get("itemId", ""))
+            qty = max(1, int(entry.get("qty", 1)))
+            sub_items_in = entry.get("subItems", [])
+
+            # Item details from catalog
+            cat_item = ITEM_LOOKUP.get(i_id, {})
+            base_name = cat_item.get("itemName", f"Item #{i_id}")
+            base_price = float(cat_item.get("sp", 0) or cat_item.get("price", 0) or 0)
+            is_veg = cat_item.get("vegNonvegBoth", "veg")
+
+            # Customizations / SubItems
+            resolved_subs = []
+            addon_price_sum = 0.0
+
+            if isinstance(sub_items_in, dict):
+                sub_items_in = list(sub_items_in.values())
+
+            for s in sub_items_in:
+                s_id = str(s.get("itemId", ""))
+                s_qty = int(s.get("qty", 1))
+                s_cat = ITEM_LOOKUP.get(s_id, {})
+                s_name = s.get("itemName") or s_cat.get("itemName", f"Option #{s_id}")
+                s_price = float(s.get("price", 0) or s.get("sp", 0) or s_cat.get("sp", 0) or 0)
+                addon_price_sum += s_price * s_qty
+                resolved_subs.append({
+                    "itemId": s_id,
+                    "itemName": s_name,
+                    "sp": s_price,
+                    "price": s_price,
+                    "subTotal": s_price * s_qty,
+                    "qty": s_qty,
+                })
+
+            effective_unit_price = base_price + addon_price_sum
+            line_subtotal = effective_unit_price * qty
+            subtotal += line_subtotal
+
+            order_item_id = entry.get("orderItemId") or f"oi_{idx + 1}"
+            entry["orderItemId"] = order_item_id
+
+            lines.append({
+                "orderItemId": order_item_id,
+                "itemId": i_id,
+                "parentId": str(cat_item.get("parentId", i_id)),
+                "itemName": base_name,
+                "price": str(base_price),
+                "subTotal": line_subtotal,
+                "qty": qty,
+                "veg": is_veg,
+                "itemSaleType": "delivery",
+                "validateStatus": 1,
+                "subItems": resolved_subs
+            })
+
+        # Charges & Taxes
+        is_delivery = cart_state.get("orderType", "1") == "1"
+        delivery_charge = 40.0 if (is_delivery and subtotal > 0) else 0.0
+        packaging_charge = 30.0 if subtotal > 0 else 0.0
+        tax_rate = 0.05  # 5% GST
+        taxes = round(subtotal * tax_rate, 2)
+        half_tax = round(taxes / 2.0, 2)
+
+        discount = float(cart_state.get("promoDiscount", 0.0))
+        wallet = float(cart_state.get("walletApplied", 0.0))
+
+        grand_total = max(0.0, round(subtotal + packaging_charge + delivery_charge + taxes - discount - wallet, 2))
+
+        # Order Details Record
+        order_record = {
+            "orderId": "66349912",
+            "businessId": "6634",
+            "subTotal": round(subtotal, 2),
+            "taxes": taxes,
+            "taxBreakUp": [
+                {"name": "CGST", "tax": 2.5, "amount": half_tax},
+                {"name": "SGST", "tax": 2.5, "amount": half_tax}
+            ],
+            "packaging_charges": packaging_charge,
+            "packagingCharge": packaging_charge,
+            "deliveryCharges": delivery_charge,
+            "serviceCharges": 0.0,
+            "discount": discount,
+            "wallet_amount": wallet,
+            "totalAmt": grand_total,
+            "grandTotal": grand_total,
+            "promoCodeId": 1 if cart_state.get("promoCode") else 0,
+            "promoCode": cart_state.get("promoCode", ""),
+            "code": cart_state.get("promoCode", ""),
+            "deliveryAddressId": cart_state.get("addressId", "addr_101"),
+            "addressLine1": "Flat 402, Sunshine Heights",
+            "addressLine2": "Pokhran Road No. 1",
+            "locality": "Vartak Nagar",
+            "city": "Thane",
+            "pincode": "400606",
+            "name": "Home",
+            "orderType": int(cart_state.get("orderType", "1")),
+            "slotsDetails": [
+                {
+                    "date": time.strftime("%Y-%m-%d"),
+                    "slots": [
+                        {"id": "1", "label": "Deliver Now (30 Mins)", "start_time": "10:00", "end_time": "23:00"}
+                    ]
+                }
+            ]
+        }
+
+        response_payload = {
+            "status": 1,
+            "msg": promo_msg or "Cart synchronized successfully",
+            "result": {
+                "rows": {
+                    "orderDetails": [order_record],
+                    "orderItemDetails": lines,
+                    "subTotal": round(subtotal, 2),
+                    "totalTax": taxes,
+                    "packagingCharge": packaging_charge,
+                    "deliveryCharges": delivery_charge,
+                    "discount": discount,
+                    "grandTotal": grand_total,
+                    "totalAmt": grand_total,
+                    "promoCodes": [
+                        {"code": "LAPINOZ50", "discount": 50, "description": "Flat ₹50 OFF on orders above ₹199"},
+                        {"code": "WELCOME", "discount_pct": 10, "description": "10% OFF on your order"}
+                    ],
+                    "suggestions": [],
+                    "validation": {"status": 1, "message": "Cart is valid and serviceable"}
+                }
+            }
+        }
+        return self._send_json(response_payload)
+
+    def _handle_pay_initiate(self, query):
+        """Creates order and returns payment parameters or mock direct redirect."""
+        order_id = f"6634{int(time.time() % 100000):05d}"
+        cart_state = SESSION_STATE["cart"]
+        subtotal = sum(
+            float(ITEM_LOOKUP.get(str(it.get("itemId")), {}).get("sp", 0) or 150) * int(it.get("qty", 1))
+            for it in cart_state["items"]
+        )
+        total_amt = max(0.0, round(subtotal + 30.0 + (40.0 if cart_state.get("orderType") == "1" else 0) + round(subtotal * 0.05, 2) - cart_state.get("promoDiscount", 0) - cart_state.get("walletApplied", 0), 2))
+
+        # Store created order in SESSION_STATE
+        SESSION_STATE["orders"][order_id] = {
+            "order_id": order_id,
+            "current_status": "1",
+            "payment_status": "1",
+            "order_amount": total_amt,
+            "kitchen_status": "PREPARING",
+            "created_at": time.time(),
+        }
+
+        # Clear cart upon order placement
+        SESSION_STATE["cart"]["items"] = []
+
+        return self._send_json({
+            "status": 1,
+            "msg": "Order initiated successfully",
+            "orderId": order_id,
+            "payment_gateway_direct": 0,
+            "redirect": f"/order-polling/{order_id}",
+            "razorpay": {
+                "key": "rzp_test_lapinoz_mock_platform",
+                "amount": int(total_amt * 100),
+                "currency": "INR",
+                "name": "La Pino'z Pizza",
+                "order_id": f"order_rzp_{order_id}",
+                "callback_url": f"/order-polling/{order_id}"
+            }
+        })
+
+    def _handle_get_order_status(self, query):
+        """Simulates live order lifecycle progression (Received -> Preparing -> Dispatched)."""
+        order_id = query.get("orderId", ["66349912"])[0]
+        order = SESSION_STATE["orders"].get(order_id)
+        if not order:
+            order = {
+                "order_id": order_id,
+                "current_status": "1",
+                "payment_status": "1",
+                "order_amount": 340.9,
+                "kitchen_status": "PREPARING",
+                "created_at": time.time(),
+            }
+            SESSION_STATE["orders"][order_id] = order
+
+        # Progress lifecycle based on elapsed seconds
+        elapsed = time.time() - order.get("created_at", time.time())
+        if elapsed > 45:
+            current_status = "4"  # Dispatched with Rider
+            kitchen_status = "OUT_FOR_DELIVERY"
+        elif elapsed > 20:
+            current_status = "3"  # Food Prepared
+            kitchen_status = "READY_FOR_PICKUP"
+        elif elapsed > 10:
+            current_status = "2"  # Confirmed by Kitchen
+            kitchen_status = "PREPARING"
+        else:
+            current_status = "1"  # Received
+            kitchen_status = "RECEIVED"
+
+        return self._send_json({
+            "status": 1,
+            "result": {
+                "order_id": order_id,
+                "current_status": current_status,
+                "payment_status": "1",
+                "order_amount": order.get("order_amount", 340.9),
+                "kitchen_status": kitchen_status,
+                "eta": "25-30 Mins",
+                "rider": {
+                    "name": "Ramesh Kumar",
+                    "phone": "9876543210",
+                    "vehicle": "MH04-AB-1234"
+                }
+            }
+        })
+
+    def _handle_get_active_orders(self):
+        """Returns recent active orders for the profile sidebar."""
+        user = SESSION_STATE["users"].get("9876543210", {})
+        active_list = []
+        for o_id, o in SESSION_STATE["orders"].items():
+            active_list.append({
+                "orderId": o_id,
+                "businessId": "6634",
+                "brandName": "La Pino'z Pizza",
+                "orderAmount": o.get("order_amount", 340.9),
+                "orderStatus": o.get("kitchen_status", "PREPARING"),
+                "currentStatus": o.get("current_status", "1"),
+                "date": time.strftime("%d %b %Y, %I:%M %p")
+            })
+        return self._send_json({"status": 1, "active_orders": active_list})
 
 
-def run_server():
-    server_address = ("", PORT)
-    httpd = http.server.HTTPServer(server_address, DotPeHandler)
+def run_server(port=DEFAULT_PORT):
+    """Starts the simulation server on the designated port."""
+    server_address = ("", port)
+    try:
+        httpd = http.server.HTTPServer(server_address, LaPinozHandler)
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"[Notice] Port {port} in use, trying port {port + 1}...")
+            return run_server(port + 1)
+        raise e
+
     print("=" * 70)
-    print(" 🍕 1441 Pizzeria - DotPe Offline Simulation Server")
+    print("🍕  LA PINO'Z PIZZA & uENGAGE - STANDALONE SIMULATION SERVER  🍕")
     print("=" * 70)
-    print(f" Loaded Catalog: {len(CATEGORIES_DATA)} Categories, {len(MENU_ITEMS_DATA)} Menu Items")
-    print(f" Web Server Running at: http://localhost:{PORT}")
-    print(f" Direct Storefront URL: http://localhost:{PORT}/store/6/delivery")
-    print(f" Direct Cart URL:       http://localhost:{PORT}/cart")
+    print(f"Server running at:  http://localhost:{port}/")
+    print(f"Storefront Sides:  http://localhost:{port}/order/lapinoz-vartak-nagar-thane?section_slug=sides")
+    print(f"Checkout URL:      http://localhost:{port}/checkout/6634/1")
+    print(f"Order Tracking:    http://localhost:{port}/order-polling/66349912")
+    print("-" * 70)
+    print("Press Ctrl+C to terminate.")
     print("=" * 70)
-    print("Press Ctrl+C to stop the server.")
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping server...")
+        print("\n[Shutdown] Server stopped by user.")
         httpd.server_close()
 
 
 if __name__ == "__main__":
-    run_server()
+    cli_port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    run_server(cli_port)
