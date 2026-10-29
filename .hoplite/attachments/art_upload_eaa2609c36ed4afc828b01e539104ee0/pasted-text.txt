@@ -1,0 +1,54 @@
+try to execute all of this Price Parameter Tampering / Business Logic Flaw	CWE-472 / CWE-840
+Insecure State Transition / Order Hijacking	CWE-362 / CWE-840
+Broken Object Level Authorization (BOLA / IDOR)	CWE-639 / OWASP API1:2023
+Dava India Pharmacy	Broken Function Level Authorization (BFLA)	CWE-285 / OWASP API5:2023
+Business Logic Flaw / Arbitrary Coupon Creation (100% Off)	CWE-840
+Security Control Bypass (Prescription Requirement Bypass)	CWE-284
+Honda Dealer eCommerce	Broken Password Recovery Mechanism	CWE-640
+Broken Access Control / Horizontal & Vertical Privilege Escalation	CWE-284 / OWASP A01:2021
+Tata nexarc (B2B Procurement)	Sensitive Information Exposure in API Response (OTP Leakage)	CWE-200 / OWASP API3:2023
+Broken Authentication / Account Takeover (ATO)	CWE-287 / OWASP API2:2023
+Broken Registration Flow / Missing Invitation Verification	CWE-306
+Improper Privilege Management (National Admin Escalation)	CWE-269 / OWASP API5:2023 (BFLA)
+VE Commercial Vehicles (My Eicher)	Missing Authentication for Critical Function	CWE-306 / OWASP API2:2023
+Mass Sensitive Data Exposure (Historical OTP Database Leak)	CWE-200
+Toyota Global Supplier Network (GSPIMS)	Unauthenticated Token Generation Backdoor	CWE-306 / CWE-287
+Privilege Escalation to System Administrator	CWE-269
+Siemens AMA Cloud	Improper Verification of Cryptographic Signature (JWT Bypass)	CWE-347 / OWASP API2:2023
+Client-Side Security Control Bypass	CWE-602
+Cracker Barrel Rewards	Client-Side Enforcement of Server-Side Security	CWE-602
+Missing Authentication / Empty Token Acceptance	CWE-306
+Honeywell BEDQ	Broken Authentication on Management API	CWE-306 / OWASP API2:2023
+Privilege Escalation via Object Level Manipulation (BOLA)	CWE-269 / CWE-639
+Coal India (DeepSight AI)	Missing Authentication on User Management Endpoint	CWE-306
+Cleartext Storage of Sensitive Information (Plaintext Passwords)	CWE-312 / CWE-200
+Client-Side Role Spoofing	CWE-602
+Bluspark Global (BLUVOYIX)	Unrestricted Administrative User Registration	CWE-285 / CWE-306
+Sensitive Data Exposure via API (Plaintext Passwords)	CWE-200 / CWE-312
+Toyota Customer 360 CRM	Client-Side Access Control Bypass	CWE-602
+Missing Authentication on Production API Endpoints	CWE-306
+Jacuzzi SmartTub IoT Admin	Client-Side Role Enforcement Bypass (isAdmin Check)	CWE-602
+Broken Function Level Authorization (BFLA)	CWE-285 / OWASP API5:2023
+Fortune 500 Healthcare App	Client-Side Single Sign-On (SSO) Guard Bypass	CWE-602 / CWE-285
+Hardcoded Static API Key	CWE-798
+Intel Corporation (Intel Outside)	Improper Token Validation / Arbitrary Bearer Token Acceptance	CWE-345
+Client-Side SSO Flow Bypass	CWE-602
+Use of Hard-coded Cryptographic Keys & Credentials	CWE-798 / CWE-321
+Johnson & Johnson (ATMS & Mobility)	Missing Server-Side API Authentication / SSO Façade Pattern	CWE-306 / CWE-602
+Hardcoded API Key Authentication Bypass	CWE-798
+SKCET Admission Portal (SparK)	Missing API Authentication / Cookie-Based Session Spoofing	CWE-306 / CWE-287
+Insecure Direct Object Reference (IDOR)	CWE-639 / OWASP API1:2023
+Toyota Tsusho Insurance (TTIBI)	Information Exposure Through Verbose Error Message (SMTP Leak)	CWE-209 / CWE-200
+Unauthenticated Mailer Endpoint	CWE-306
+Improper/Missing API Authentication	CVE-2023-6483 / CWE-306
+Insecure Direct Object Reference (IDOR / BOLA)	CWE-639 / OWASP API1:2023
+Tata Motors	Hardcoded Cloud Credentials (Exposed AWS Secret Keys)	CWE-798 / CWE-200
+Weak Cryptography / Reversible Client-Side Encryption	CWE-321 / CWE-327
+Authentication Bypass via Misconfigured Trusted Auth (Tableau)	CWE-287
+Daimler / Mercedes-Benz USA	Insecure Direct Object Reference (IDOR) / Parameter Tampering	CWE-639 / OWASP A01:2021
+Unrestricted Sequential Attachment Enumeration	CWE-200
+Microsoft Private Xbox Forums	Security Misconfiguration (Unauthenticated Staging Deployment)	CWE-306 / OWASP A05:2021
+Telecom Office Cameras	Missing Authentication on Video/Image Stream API	CWE-306 / OWASP API2:2023
+Industrial Generators Smart IoT	Broken Function Level Authorization (BFLA)	CWE-285 / OWASP API5:2023
+Insecure Direct Object Reference (IDOR) on Device Telemetry	CWE-639
+Niantic Pokémon GO	Improper Certificate Validation / SSL Certificate Pinning Bypass	CWE-295
