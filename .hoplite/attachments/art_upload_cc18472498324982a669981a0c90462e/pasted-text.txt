@@ -1,0 +1,207 @@
+Key Points / Summary
+API flaws in the McDonald’s McDelivery system in India, one of the world’s most popular food delivery apps, enabled a variety of fun exploits:
+
+The ability to order any number of menu items for ₹1 ($0.01 USD).
+The ability to steal/hijack/redirect other people’s delivery orders through a specific sequence of carefully timed API calls.
+The ability to retrieve the details of any order.
+The ability to track any order in the “On the way” status. You could real-time track the location of the driver for any order.
+The ability to download invoices for any order.
+The ability to submit feedback for orders that are not your own.
+The ability to view admin KPI reports.
+Sensitive driver/rider information that could be accessed:
+Name
+Email address
+Phone number
+Vehicle license plate number
+Profile picture
+Everyone reading this knows about McDonald’s and maybe even had breakfast there on the way to work today! When I was younger, I enjoyed the Happy Meals and sometimes playing in the Play Place. While I eat there infrequently nowadays, McDonald’s is usually my top pick for a safe, reliable bite to eat while travelling. In recent months I decided to try my hand in finding exploits in the food industry. McDonald’s USA doesn’t have an official bug bounty program, so I didn’t bother with them. McDonald’s in India does however, so that is where I began my search. What follows is an exciting experience in helping one of the world’s most iconic brands fix security problems before malicious hackers take a bite out of them.
+
+The McDelivery system
+
+McDonald’s India, specifically McDonald’s India (West & South) / Hardcastle Restaurants Pvt. Ltd., own/operate McDonald’s restaurants across West and South India. They also operate a system called McDelivery which, as you can guess, lets people order McDonald’s for delivery. You can order food for dine-in and takeout as well. McDelivery is also available in many other countries, but India has developed their own custom web app that is unique to them.
+
+McDelivery is available online via https://mcdelivery.co.in/ and through mobile apps. It currently has more than 10 million downloads on Google Play and is #16 in Food & Drink on the Apple App Store (as of 11/12/2024). It’s definitely extremely popular.
+
+
+McDelivery homepage, 11/12/2024
+McDelivery is also not limited to just delivery. There are a variety of options to choose from to get your food:
+
+
+McDelivery is no stranger to security problems. Back in 2017, there was an incident that leaked user data. It looks like nothing notable has happened since then, so the security seems to have held up.. until I started tearing it apart.
+
+Walking through the arches
+The McDelivery website and mobile apps are built using Angular, a popular single-page-application framework. It is a good fit for this type of high interactivity consumer-facing app. The first order of business was to look for some routes to see what kind of functionality this web app offered. It didn’t take long to find interesting routes related to orders:
+
+
+At this point I had no idea what order, cart, or user IDs look like. In these situations, I tend to try “0” or “1” to test whether they are simple integer values. In the browser address bar, I put in the “order-tracking” route with values for orderId, cartId, and userId. Lo and behold, I got a result!
+
+
+Is that not the coolest animation!?
+I was shocked at how easy that was. This type of vulnerability is called Broken Object Level Authorization or “BOLA’. This is a very common vulnerability I see all the time. Many BOLAs were found in McDelivery.
+
+Digging into the code and network activity of the site, I found that ultimately only the order ID mattered, which I had set to 1. It’s used in 2 requests:
+
+First, the order status. This has basic information about the order. Nothing particularly sensitive here.
+Second, the order location.
+
+
+Order IDs are sequential, meaning you can keep adding 1 to the number to get the details of the next order, and in turn get even more user information. Not good!
+
+One thing that stuck out in those API calls was the JWT token. At this point I have not created an account and was not logged in. The token came from a guest login API call that runs in the background when you load the website:
+
+
+It’s always good to see some sort of auth token being used with APIs. You’d be surprised how many huge corporations forget to utilize one. However, despite there being valid auth in this case, something seems amiss since I, a guest user, was able to access order details of another user.
+
+Golden reviews
+I started incrementing that order ID and noticed that order ID 6 had a new section where you could leave feedback on your order. The previous orders were already reviewed, and #6 was not. These early test orders were made by developers, so I decided to try and leave a review to see if it would be accepted:
+
+
+The API was happy to accept my review:
+
+
+I then tweaked the API call a bit to try retrieving the last review before mine. The response of the API call above included an ID which serves as the ID for the review I just left. I subtracted 1 from that number and fired off a new API request. It was successful:
+
+
+Mapping a delivery
+Going back to the Angular routes, the next one I wanted to try was the rider tracking. This one also takes an order ID. This page functions as a real-time tracking system that shows the location of your delivery driver. The page wouldn’t work with test order IDs 1 or 6 because those were “delivered” long ago. I needed a real order, one that was on the way right now.
+
+The order feedback API I had just played with contained the solution. When I retrieved the last review before mine, it contained a vital clue: the order ID. I now had a starting point to try and find the latest orders. A lot of ID manipulation later, I eventually found one that was on the way:
+
+
+Another cool touch by the developers: the delivery driver bike – look next to the M icon.
+Just like the order tracking page, there is an underlying API that provides the latitude and longitude of the driver. It also provides some extra information like their phone number, email, name, and license plate number.
+
+
+You could easily repeat this request with different order IDs to collect personal information about various drivers.
+
+Anyone can become a McDelivery driver or “rider”. There is an app for it and it seems to work as you’d expect – sign up, set your availability, and get going.
+
+Check, please
+I noticed on the order tracking page, the “Invoice” link would trigger an API call to download the original invoice for the order. Additionally, digging around in the JavaScript code, I found a second API to generate an invoice in a slightly different format. Both were vulnerable to order ID manipulation, so it was possible to download the invoice of any order.
+
+
+
+Creating an account
+Creating a McDelivery account requires an Indian phone number to retrieve a verification code. Despite my best efforts, I could not successfully create an account this way. Without an account, you couldn’t actually place an order, so the research was about to end here… until I found a secret user creation API.
+
+On a whim, I sent a GET request to the root auth API path and it returned a small list of API endpoints:
+
+
+Would you call this the McDonald’s “secret menu”? 🤔
+The user/create API was of the most interest because it was different than the normal signup flow and it was not used anywhere in the app. Since there was no reference material for crafting a valid request, I had to figure it out myself. Fortunately, an empty POST request prompted the API to tell me what it expected:
+
+
+I was then able to successfully create an account, without any verification needed:
+
+
+This was a key first step, but only half the journey. While this made it possible to create an account, the login worked via verification code, so it still wasn’t possible to log in at this point without a way to retrieve that code.
+
+The final clue came when looking at the routes one more time. A hidden “auth-with-password” page exists that made it possible to log in using password. Despite the placeholder text, the page was fully functional, and I was able to log in:
+
+
+
+
+Logged in and being prompted to complete my profile.
+The big bite: Ordering anything for a penny
+With an account in hand, it was now possible to get to the good stuff: the order/checkout flow. At this point I already had some significant findings, but I was still hungry for a second helping.
+
+Getting started, you are asked to confirm your location. A map is displayed where you have to place a pin. I’m going to choose my imaginary yacht:
+
+
+Then you simply browse the menu and add whatever you’d like to your cart. I’m a generous host on my imaginary yacht, so I decided to get everyone hash browns, and a special drink for me. I LOVE McDonald’s hash browns and everyone else does too (right?)
+
+
+Can you spot the problem? At the bottom it says, “Selected address is not serviceable”. I was heartbroken and thought about seeing if KFC would take my money instead. But Angular apps are meant to be broken, so I did a simple trick and removed the disabled attribute from the button. That did the job:
+
+
+I was able to click the button now and be redirected to the payment processor, Juspay.
+
+
+Now I had a new problem: it’s too expensive! That is about $68 USD. I wanted a discount.
+
+Let’s go through the order process step-by-step.
+
+Cart & Items
+There really aren’t any surprises with this. When you add an item to your cart, a cart is created first if you don’t have an active one. A cart is represented by a GUID. Once a cart is created, you add items (using the item’s ID) to your cart object. It’s simple and a very common design.
+
+Order & Checkout
+When you are done adding to cart and want to pay, you go to the checkout page. You review the items and the total. Using the cart ID, a POST request is made to an orders API, and that API returns information that is used to redirect to Juspay for payment:
+
+
+I looked at the possibility of editing the amount field there. Also, if you had another user’s account ID, I thought maybe you could put it there and use someone else’s stored payment method to pay for the order. Unfortunately, all attempts at modifying these fields failed, and here’s why.
+
+There is a signature that covers the orderDetails. That contains all the key values that need to be modified for any fun to be had. There are some fields outside of orderDetails but changing them did not produce the expected result. The signature is generated like this on the server-side:
+
+The orders API accepts your cart ID and it extracts all the needed information from the cart object.
+The orderDetails object is created, and the RSA signature is created based on that.
+Both are returned to the client.
+This is an example of a good design because it ensures the client can’t tamper with important values, like the amount of money to pay. More information about the signature process is here.
+
+I was starting to believe this was a dead end. The developers did this part right and it was very unlikely it would be possible to exfiltrate their private RSA key. Any hope of success would involve tampering with data before the RSA signing takes place.
+
+I took a step back and looked at the cart object and an idea came to mind. The cart object was able to accept item updates, but could it accept price updates too? I put together a PUT request to update the price. Surprisingly, it worked:
+
+
+This type of vulnerability is called Broken Object Property Level Authorization or “Mass Assignment”. Unlike BOLA, this is an uncommon vulnerability that I never usually have any success in finding/exploiting. It seemed it was possible to update most McDelivery objects and fields in this way, opening the door to lots of possibilities.
+
+I tempered my excitement for a moment because there was still a good chance that the server would recalculate the price before creating the orderDetails object and signing it. The only way to test was to check out again. I went through the checkout again and the order creation now looks extremely promising!
+
+
+orderDetails contains our custom price, and we have a valid signature for it. The Juspay checkout will happily accept this. The cheap price also enabled a new “Cash On Delivery” payment method, which made it easier to complete the checkout.
+
+
+🎵 Toss A Coin To Your Witcher Driver
+I decided to try and complete the checkout. I found a cancellation API I could use to quickly cancel it before the order got too far along. The checkout succeeded as expected.
+
+
+The amount just melted away, like magic!
+
+Can you count how many times that McFlurry gets stirred?
+A question you may have is, would the order have actually been delivered were it not cancelled? I believe it would have been if you gave a correct address and didn’t go overboard with items. While I know people in India that would have been happy to test, I decided not to because it would have inflicted financial fraud on the company. This would have been a step too far.
+
+It is also worth noting that a price of 0 did not work because Juspay requires a value greater than 0 for the amount, so it wasn’t possible to order anything for free.
+
+Stealing someone else’s order
+
+Credit: Sequel Memes 3
+Still a little hungry, I wanted to try and see if it was possible to steal/redirect someone else’s in-progress order to my address or have someone else pay for mine. I created another account for this test. I did not test against any real users – it was important to not cause any disruption to legit orders, and to not defraud or phish anyone.
+
+The first thing I tried was an edit to the user ID on the cart object. The API accepted the change, but it resulted in an internal server error when checking out. I didn’t have any other ideas for trying to gain access to another user’s payment options to pay for my order, so I moved on to trying to redirect an existing order.
+
+The goal for this test was to try to update an order placed on another account in a way to get it sent to my address instead of theirs. Also in a way that they would be powerless to stop. I have 2 accounts ready for this – consider account 1 my account, and account 2 the victim.
+
+Step 1: Setting up addresses
+Both accounts need an address in their address book, so I chose some random ones:
+
+
+
+The address ID assigned by the API for the first account is 29459202.
+
+Step 2: Payment rug pull
+The victim then creates an order and is redirected to Juspay to pay. Before they enter their payment information and confirm the payment, my account will do a PUT request on the victim account’s order to replace their address ID with mine. The API response includes the new address ID, indicating success:
+
+
+After that, the victim pays for the order, not knowing the address has just been changed behind the scenes. But if they go into their order history and view more details, they may notice the address is wrong! 😱
+
+To be clear: This exploit is very time based and you have to find an order in specific states for the exploit to work.
+
+
+Screenshot of the order seen from the victim/account 2’s view. The address has been changed to mine/account 1’s.
+Step 3: The takeout
+To prevent the victim from noticing the change and potentially cancelling the order, there is an optional step: reassign the order to my account. This is done through another PUT request on the order to change the user ID to my account’s:
+
+
+After this, the order is completely disassociated from the victim’s account and is now in my account’s order history. Fully paid for, of course.
+
+
+Screenshot of the order seen from the mine/account 1’s view.
+Presumably, the victim now has no control over their order at all. If they call customer service, they probably wouldn’t see it either and there would be a lot of finger pointing.
+
+Real-world attack scenario
+This attack requires careful timing to succeed. When changing the address of an order, it would only work when the order was in the Initiated or Pending status. Orders move out of these states quickly, so fast action is required.
+
+Admin panel
+An admin panel for McDelivery exists at https://oms.mcdelivery.co.in/ and it seems it is more secure than the consumer website! I couldn’t find any way to get inside, but I did find an admin endpoint to view KPI reports that accepted consumer JWT tokens. All the other APIs rejected the token. Due to confidentiality, KPI numbers cannot be shared, so please don’t ask.
+
+
+With Ronald McDonald standing guard, no wonder it’s mostly secure!
